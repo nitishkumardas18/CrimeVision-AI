@@ -12,23 +12,18 @@ app.use((req, res, next) => {
     next();
 });
 
-// Helper to fetch all rows by paginating through ZCQL limit of 300
 async function fetchAllRows(zcql, baseQuery) {
     let allRows = [];
-    let offset = 1; // Catalyst offsets are 1-based (or LIMIT 300 OFFSET 1 means start at row 1)
-    const limit = 300;
+    let offset = 1; 
+    const limit = 200; // Safe limit
     
     while (true) {
-        // Catalyst ZCQL format: SELECT ... FROM ... LIMIT offset, limit
-        // Wait, Zoho Catalyst ZCQL uses `LIMIT {offset}, {limit}` syntax! Or `LIMIT {limit} OFFSET {offset}`?
-        // Wait, Catalyst docs say: `LIMIT {start_index}, {number_of_rows}`
-        // where start_index starts from 1!
         const paginatedQuery = `${baseQuery} LIMIT ${offset}, ${limit}`;
         const res = await zcql.executeZCQLQuery(paginatedQuery);
         if (res && res.length > 0) {
             allRows = allRows.concat(res);
-            if (res.length < limit) break;
-            offset += limit;
+            if (res.length < limit) break; // If less than limit, we reached the end
+            offset += res.length; // Properly increment offset by actual rows returned
         } else {
             break;
         }
@@ -255,10 +250,15 @@ app.get('/wipe', async (req, res) => {
             const rowIds = result.map(r => r[tableName].ROWID);
             const table = datastore.table(tableName);
             
-            // Delete in batches of 100
-            for (let i = 0; i < rowIds.length; i += 100) {
-                const batch = rowIds.slice(i, i + 100);
-                await table.deleteRows(batch);
+            // Delete in batches of 200 concurrently
+            const promises = [];
+            for (let i = 0; i < rowIds.length; i += 200) {
+                const batch = rowIds.slice(i, i + 200);
+                promises.push(table.deleteRows(batch));
+            }
+            // Execute in chunks to avoid overwhelming the database connections
+            for (let i = 0; i < promises.length; i += 10) {
+                await Promise.all(promises.slice(i, i + 10));
             }
             return rowIds.length;
         }
