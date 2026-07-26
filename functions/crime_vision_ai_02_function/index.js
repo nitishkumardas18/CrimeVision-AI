@@ -12,41 +12,71 @@ app.use((req, res, next) => {
     next();
 });
 
+// Helper to fetch all rows by paginating through ZCQL limit of 300
+async function fetchAllRows(zcql, baseQuery) {
+    let allRows = [];
+    let offset = 1; // Catalyst offsets are 1-based (or LIMIT 300 OFFSET 1 means start at row 1)
+    const limit = 300;
+    
+    while (true) {
+        // Catalyst ZCQL format: SELECT ... FROM ... LIMIT offset, limit
+        // Wait, Zoho Catalyst ZCQL uses `LIMIT {offset}, {limit}` syntax! Or `LIMIT {limit} OFFSET {offset}`?
+        // Wait, Catalyst docs say: `LIMIT {start_index}, {number_of_rows}`
+        // where start_index starts from 1!
+        const paginatedQuery = `${baseQuery} LIMIT ${offset}, ${limit}`;
+        const res = await zcql.executeZCQLQuery(paginatedQuery);
+        if (res && res.length > 0) {
+            allRows = allRows.concat(res);
+            if (res.length < limit) break;
+            offset += limit;
+        } else {
+            break;
+        }
+    }
+    return allRows;
+}
+
 // GET /server/crime_vision_ai_02_function/crimes-by-district
 app.get('/crimes-by-district', async (req, res) => {
     try {
         const catalystApp = catalyst.initialize(req);
-        
-        // ZCQL query to join CaseMaster and District to count crimes
         const zcql = catalystApp.zcql();
-        const query = `
-            SELECT District.DistrictName, COUNT(CaseMaster.CaseMasterID) AS TotalCrimes, District.lat, District.lng 
-            FROM CaseMaster 
-            JOIN District ON CaseMaster.PoliceStationID = District.DistrictID 
-            GROUP BY District.DistrictName, District.lat, District.lng
-        `;
         
-        const result = await zcql.executeZCQLQuery(query);
+        // Fetch District and CaseMaster separately using pagination helper
+        const districtsRes = await fetchAllRows(zcql, 'SELECT DistrictID, DistrictName, lat, lng FROM District');
+        const casesRes = await fetchAllRows(zcql, 'SELECT CaseMasterID, PoliceStationID FROM CaseMaster');
         
-        // Format the response for the frontend map component
-        const formattedData = result.map(row => ({
-            name: row.District.DistrictName,
-            lat: row.District.lat,
-            lng: row.District.lng,
-            crimeCount: parseInt(row.CaseMaster.TotalCrimes || 0)
-        }));
-        
-        res.status(200).json({
-            status: 'success',
-            data: formattedData
+        // Map districts by ID
+        const districtMap = {};
+        districtsRes.forEach(row => {
+            const dist = row.District;
+            if (dist.DistrictID) {
+                districtMap[dist.DistrictID] = {
+                    name: dist.DistrictName,
+                    lat: parseFloat(dist.lat),
+                    lng: parseFloat(dist.lng),
+                    crimeCount: 0
+                };
+            }
         });
+
+        // Count cases by decoding DistrictID from PoliceStationID (e.g. 10 -> 1)
+        casesRes.forEach(row => {
+            const stationId = parseInt(row.CaseMaster.PoliceStationID || 0, 10);
+            if (stationId > 0) {
+                const distId = Math.floor(stationId / 10);
+                if (districtMap[distId]) {
+                    districtMap[distId].crimeCount++;
+                }
+            }
+        });
+
+        const formattedData = Object.values(districtMap);
+        
+        res.status(200).json({ status: 'success', data: formattedData });
     } catch (error) {
         console.error("ZCQL Error:", error);
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to fetch district crime data.',
-            details: error.toString()
-        });
+        res.status(400).json({ status: 'error', message: error.toString() });
     }
 });
 
@@ -56,41 +86,43 @@ app.get('/network-graph', async (req, res) => {
         const catalystApp = catalyst.initialize(req);
         const zcql = catalystApp.zcql();
         
-        // Fetch all Accused and their associated Cases
-        const query = `SELECT Accused.AccusedName, Accused.AccusedMasterID, CaseMaster.CaseMasterID, CaseMaster.CrimeNo 
-                       FROM Accused 
-                       JOIN CaseMaster ON Accused.CaseMasterID = CaseMaster.CaseMasterID`;
-                       
-        const result = await zcql.executeZCQLQuery(query);
+        // Fetch Accused and CaseMaster separately using pagination helper
+        const casesRes = await fetchAllRows(zcql, 'SELECT CaseMasterID, CrimeNo FROM CaseMaster');
+        const accusedRes = await fetchAllRows(zcql, 'SELECT AccusedMasterID, AccusedName, CaseMasterID FROM Accused');
         
-        let nodes = [];
-        let links = [];
-        let addedNodes = new Set();
-        
-        result.forEach(row => {
-            const accusedId = "A_" + row.Accused.AccusedMasterID;
-            const caseId = "C_" + row.CaseMaster.CaseMasterID;
-            
-            // Add Accused Node
-            if (!addedNodes.has(accusedId)) {
-                nodes.push({ id: accusedId, group: "Accused", name: row.Accused.AccusedName });
-                addedNodes.add(accusedId);
+        const nodesMap = {};
+        const links = [];
+
+        // Add Cases to nodes
+        casesRes.forEach(row => {
+            const crime = row.CaseMaster;
+            if (crime.CaseMasterID) {
+                const nodeId = `C_${crime.CaseMasterID}`;
+                nodesMap[nodeId] = { id: nodeId, group: "Case", name: `FIR: ${crime.CrimeNo}` };
             }
-            
-            // Add Case Node
-            if (!addedNodes.has(caseId)) {
-                nodes.push({ id: caseId, group: "Case", name: "FIR: " + (row.CaseMaster.CrimeNo || row.CaseMaster.CaseMasterID) });
-                addedNodes.add(caseId);
-            }
-            
-            // Add Link
-            links.push({ source: accusedId, target: caseId, value: 1 });
         });
-        
+
+        // Add Accused to nodes and create links
+        accusedRes.forEach(row => {
+            const acc = row.Accused;
+            if (acc.AccusedMasterID) {
+                const accNodeId = `A_${acc.AccusedMasterID}`;
+                nodesMap[accNodeId] = { id: accNodeId, group: "Accused", name: acc.AccusedName || `Accused ${acc.AccusedMasterID}` };
+                
+                if (acc.CaseMasterID) {
+                    const caseNodeId = `C_${acc.CaseMasterID}`;
+                    if (nodesMap[caseNodeId]) {
+                        links.push({ source: accNodeId, target: caseNodeId, value: 1 });
+                    }
+                }
+            }
+        });
+
+        const nodes = Object.values(nodesMap);
         res.status(200).json({ status: 'success', data: { nodes, links } });
     } catch (error) {
-        console.error("Network Graph Error:", error);
-        res.status(500).json({ status: 'error', message: 'Failed to fetch network graph data.' });
+        console.error("ZCQL Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
     }
 });
 
@@ -101,36 +133,37 @@ app.get('/demographic-stats', async (req, res) => {
         const zcql = catalystApp.zcql();
 
         // Fetch AgeYear and GenderID from Accused table
-        const result = await zcql.executeZCQLQuery(
-            `SELECT Accused.AgeYear, Accused.GenderID FROM Accused`
-        );
+        const result = await fetchAllRows(zcql, 'SELECT Accused.AgeYear, Accused.GenderID FROM Accused');
 
-        // Age band aggregation
-        const ageBands = { '0-18': 0, '19-30': 0, '31-45': 0, '46-60': 0, '60+': 0 };
-        const genderCount = { 'Male': 0, 'Female': 0, 'Other': 0 };
+        const demographicStats = {
+            ageGroups: { '18-25': 0, '26-35': 0, '36-45': 0, '46-60': 0, '60+': 0 },
+            gender: { 'Male': 0, 'Female': 0, 'Other': 0 }
+        };
 
         result.forEach(row => {
-            const age = parseInt(row.Accused.AgeYear || 0);
-            const gender = parseInt(row.Accused.GenderID || 0);
+            const acc = row.Accused;
+            if (acc.AgeYear) {
+                const age = parseInt(acc.AgeYear, 10);
+                if (age >= 18 && age <= 25) demographicStats.ageGroups['18-25']++;
+                else if (age >= 26 && age <= 35) demographicStats.ageGroups['26-35']++;
+                else if (age >= 36 && age <= 45) demographicStats.ageGroups['36-45']++;
+                else if (age >= 46 && age <= 60) demographicStats.ageGroups['46-60']++;
+                else if (age > 60) demographicStats.ageGroups['60+']++;
+            }
 
-            if (age <= 18) ageBands['0-18']++;
-            else if (age <= 30) ageBands['19-30']++;
-            else if (age <= 45) ageBands['31-45']++;
-            else if (age <= 60) ageBands['46-60']++;
-            else ageBands['60+']++;
-
-            if (gender === 1) genderCount['Male']++;
-            else if (gender === 2) genderCount['Female']++;
-            else genderCount['Other']++;
+            const genderId = acc.GenderID;
+            if (genderId === '1' || genderId === 1) demographicStats.gender['Male']++;
+            else if (genderId === '2' || genderId === 2) demographicStats.gender['Female']++;
+            else if (genderId === '3' || genderId === 3) demographicStats.gender['Other']++;
         });
-
-        const ageData = Object.entries(ageBands).map(([band, count]) => ({ band, count }));
-        const genderData = Object.entries(genderCount).map(([name, value]) => ({ name, value }));
+        
+        const ageData = Object.entries(demographicStats.ageGroups).map(([band, count]) => ({ band, count }));
+        const genderData = Object.entries(demographicStats.gender).map(([name, value]) => ({ name, value }));
 
         res.status(200).json({ status: 'success', data: { ageData, genderData, total: result.length } });
     } catch (error) {
-        console.error("Demographic Stats Error:", error);
-        res.status(500).json({ status: 'error', message: 'Failed to fetch demographic data.' });
+        console.error("ZCQL Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
     }
 });
 
@@ -140,172 +173,159 @@ app.get('/anomalies', async (req, res) => {
         const catalystApp = catalyst.initialize(req);
         const zcql = catalystApp.zcql();
 
-        const result = await zcql.executeZCQLQuery(
-            `SELECT CaseMaster.PoliceStationID, CaseMaster.CrimeMajorHeadID, CaseMaster.CrimeRegisteredDate FROM CaseMaster`
-        );
+        // Fetch PoliceStationID and CrimeMajorHeadID using pagination helper
+        const result = await fetchAllRows(zcql, 'SELECT CaseMaster.PoliceStationID, CaseMaster.CrimeRegisteredDate, CaseMaster.CrimeMajorHeadID FROM CaseMaster');
 
-        const crimeHeadLabel = { 1: 'Robbery', 2: 'Theft', 3: 'Assault', 4: 'Fraud', 5: 'Cybercrime' };
-        const districtLabel = { 1: 'Bengaluru Urban', 2: 'Mysuru', 3: 'Hubballi-Dharwad', 4: 'Mangaluru', 5: 'Belagavi', 6: 'Kalaburagi', 7: 'Davanagere', 8: 'Ballari' };
-
-        // Build monthly time series per district (aggregated across crime types for density)
-        // Structure: { "districtId": { "2023-10": count, ... } }
-        const districtMonthly = {};
-        let hasCrimeHead = false;
+        const crimeHeadLabel = { 1: 'Violent', 2: 'Property', 3: 'Hurt', 4: 'Fraud', 5: 'Other' };
+        const anomalyMap = {};
 
         result.forEach(row => {
-            const stationId = parseInt(row.CaseMaster.PoliceStationID || 0);
-            const districtId = Math.floor(stationId / 10);
-            if (districtId < 1 || districtId > 8) return;
-
-            const dateStr = row.CaseMaster.CrimeRegisteredDate;
-            if (!dateStr) return;
-            // Normalize: Catalyst may return "2025-04-22", "2025-04-22 00:00:00", or "2025-04-22T00:00:00.000Z"
-            const normalized = String(dateStr).replace(' ', 'T').split('T')[0]; // Always extract YYYY-MM-DD part
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return; // Skip if not parseable
-            const [year, month] = normalized.split('-');
-            const monthKey = `${year}-${month}`; // Direct extraction — no Date() object needed, avoids TZ issues
-
-            if (!districtMonthly[districtId]) districtMonthly[districtId] = {};
-            districtMonthly[districtId][monthKey] = (districtMonthly[districtId][monthKey] || 0) + 1;
-
-            if (row.CaseMaster.CrimeMajorHeadID) hasCrimeHead = true;
+            const crime = row.CaseMaster;
+            if (crime.PoliceStationID && crime.CrimeMajorHeadID) {
+                const districtId = Math.floor(crime.PoliceStationID / 10);
+                const headId = parseInt(crime.CrimeMajorHeadID, 10);
+                const headName = crimeHeadLabel[headId] || 'Other';
+                
+                if (districtId && headName) {
+                    const key = `${districtId}_${headName}`;
+                    if (!anomalyMap[key]) {
+                        anomalyMap[key] = { districtId: districtId.toString(), crimeHead: headName, count: 0 };
+                    }
+                    anomalyMap[key].count += 1;
+                }
+            }
         });
 
-        // For each district, compute Z-score against its OWN monthly baseline (1.5σ threshold)
-        const anomalies = [];
-        const seen = new Set(); // Deduplicate: keep worst month per district
+        let anomalies = Object.values(anomalyMap)
+            .filter(a => a.count > 15)
+            .map(a => ({
+                description: `High number of ${a.crimeHead} cases detected in District ${a.districtId}`,
+                severity: a.count > 30 ? 'High' : 'Medium',
+                count: a.count
+            }));
 
-        Object.entries(districtMonthly).forEach(([districtId, monthCounts]) => {
-            const months = Object.keys(monthCounts).sort();
-            if (months.length < 4) return; // Need enough history for meaningful stats
-
-            const counts = months.map(m => monthCounts[m]);
-            const mean = counts.reduce((a, b) => a + b, 0) / counts.length;
-            const variance = counts.reduce((s, c) => s + Math.pow(c - mean, 2), 0) / counts.length;
-            const stddev = Math.sqrt(variance) || 1;
-            const threshold = mean + 1.5 * stddev; // 1.5σ — statistically standard
-
-            months.forEach((month, i) => {
-                const count = counts[i];
-                if (count <= threshold) return;
-
-                const district = districtLabel[parseInt(districtId)] || `District ${districtId}`;
-                const zScore = parseFloat(((count - mean) / stddev).toFixed(2));
-                const pctAbove = parseFloat((((count - mean) / mean) * 100).toFixed(0));
-                const dedupeKey = `${districtId}`;
-
-                // Keep only the most anomalous month per district
-                const existing = anomalies.findIndex(a => a._key === dedupeKey);
-                const entry = {
-                    _key: dedupeKey,
-                    district,
-                    crime: 'All Crime Types',
-                    month,
-                    count,
-                    mean: mean.toFixed(1),
-                    stddev: stddev.toFixed(1),
-                    zScore,
-                    pctAbove,
-                    severity: zScore > 2.5 ? 'Critical' : 'High',
-                    description: `${district} — ${month} had ${count} cases vs monthly average of ${mean.toFixed(1)} (Z=${zScore}, ${pctAbove}% above baseline)`
-                };
-
-                if (existing === -1) anomalies.push(entry);
-                else if (zScore > anomalies[existing].zScore) anomalies[existing] = entry;
-            });
-        });
-
-        // Clean up internal key and sort by z-score
-        const clean = anomalies
-            .map(({ _key, ...rest }) => rest)
-            .sort((a, b) => b.zScore - a.zScore);
-
-        res.status(200).json({ status: 'success', data: clean });
+        res.status(200).json({ status: 'success', data: anomalies });
     } catch (error) {
-        console.error("Anomalies Error:", error);
-        res.status(500).json({ status: 'error', message: 'Failed to fetch anomaly data.' });
+        console.error("ZCQL Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
     }
 });
 
-// Helper: Simple OLS Linear Regression — returns { slope, intercept, rSquared }
-function linearRegression(xArr, yArr) {
-    const n = xArr.length;
-    const xMean = xArr.reduce((a, b) => a + b, 0) / n;
-    const yMean = yArr.reduce((a, b) => a + b, 0) / n;
-    const ssXY = xArr.reduce((s, x, i) => s + (x - xMean) * (yArr[i] - yMean), 0);
-    const ssXX = xArr.reduce((s, x) => s + Math.pow(x - xMean, 2), 0);
-    const slope = ssXX === 0 ? 0 : ssXY / ssXX;
-    const intercept = yMean - slope * xMean;
-    // R-squared
-    const ssTot = yArr.reduce((s, y) => s + Math.pow(y - yMean, 2), 0);
-    const ssRes = yArr.reduce((s, y, i) => s + Math.pow(y - (slope * xArr[i] + intercept), 2), 0);
-    const rSquared = ssTot === 0 ? 1 : 1 - ssRes / ssTot;
-    return { slope, intercept, rSquared };
-}
-
-// GET /server/crime_vision_ai_02_function/forecast
-app.get('/forecast', async (req, res) => {
+// GET /server/crime_vision_ai_02_function/trends
+app.get('/trends', async (req, res) => {
     try {
         const catalystApp = catalyst.initialize(req);
         const zcql = catalystApp.zcql();
 
-        // Fetch monthly crime counts across all districts
-        const result = await zcql.executeZCQLQuery(
-            `SELECT CaseMaster.CrimeRegisteredDate FROM CaseMaster`
-        );
+        const result = await fetchAllRows(zcql, 'SELECT CaseMaster.CrimeRegisteredDate FROM CaseMaster');
 
-        // Aggregate by year-month
         const monthlyCounts = {};
         result.forEach(row => {
             const dateStr = row.CaseMaster.CrimeRegisteredDate;
-            if (!dateStr) return;
-            const normalized = String(dateStr).replace(' ', 'T').split('T')[0];
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return;
-            const [year, month] = normalized.split('-');
-            const key = `${year}-${month}`;
-            monthlyCounts[key] = (monthlyCounts[key] || 0) + 1;
+            if (dateStr) {
+                // assume 'yyyy-mm-dd'
+                const parts = dateStr.split('-');
+                if (parts.length >= 2) {
+                    const ym = `${parts[0]}-${parts[1]}`;
+                    monthlyCounts[ym] = (monthlyCounts[ym] || 0) + 1;
+                }
+            }
         });
 
-        // Sort keys chronologically
-        const sortedKeys = Object.keys(monthlyCounts).sort();
-        const historicalData = sortedKeys.map((month, idx) => ({
-            month, count: monthlyCounts[month], idx
-        }));
+        const data = Object.entries(monthlyCounts)
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([month, crimeCount]) => ({ month, crimeCount }));
 
-        let predicted = null;
-        let method = 'linear_regression';
-
-        if (historicalData.length >= 3) {
-            const xArr = historicalData.map(d => d.idx);
-            const yArr = historicalData.map(d => d.count);
-            const { slope, intercept, rSquared } = linearRegression(xArr, yArr);
-
-            const nextIdx = historicalData.length;
-            // If R² < 0.3, regression line is unreliable — use moving average of last 3 months as fallback
-            if (rSquared < 0.3) {
-                method = 'moving_average';
-                const last3 = yArr.slice(-3);
-                predicted = Math.round(last3.reduce((a, b) => a + b, 0) / last3.length);
-            } else {
-                predicted = Math.round(slope * nextIdx + intercept);
-            }
-
-            // Compute next month label
-            const lastDate = new Date(sortedKeys[sortedKeys.length - 1] + '-01');
-            lastDate.setMonth(lastDate.getMonth() + 1);
-            const nextMonth = `${lastDate.getFullYear()}-${String(lastDate.getMonth() + 1).padStart(2, '0')}`;
-
-            res.status(200).json({
-                status: 'success',
-                method,
-                data: { historical: historicalData, predicted: { month: nextMonth, count: predicted, isForecast: true } }
-            });
-        } else {
-            res.status(200).json({ status: 'success', method: 'insufficient_data', data: { historical: historicalData, predicted: null } });
-        }
+        res.status(200).json({ status: 'success', data });
     } catch (error) {
-        console.error("Forecast Error:", error);
-        res.status(500).json({ status: 'error', message: 'Failed to compute forecast.' });
+        console.error("ZCQL Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
+    }
+});
+
+// GET /server/crime_vision_ai_02_function/wipe
+app.get('/wipe', async (req, res) => {
+    try {
+        const catalystApp = catalyst.initialize(req);
+        const zcql = catalystApp.zcql();
+        const datastore = catalystApp.datastore();
+
+        async function wipeTable(tableName) {
+            const result = await fetchAllRows(zcql, `SELECT ROWID FROM ${tableName}`);
+            const rowIds = result.map(r => r[tableName].ROWID);
+            const table = datastore.table(tableName);
+            
+            // Delete in batches of 100
+            for (let i = 0; i < rowIds.length; i += 100) {
+                const batch = rowIds.slice(i, i + 100);
+                await table.deleteRows(batch);
+            }
+            return rowIds.length;
+        }
+
+        const dCount = await wipeTable('District');
+        const cCount = await wipeTable('CaseMaster');
+        const aCount = await wipeTable('Accused');
+        
+        res.status(200).json({ status: 'success', message: `Wiped ${dCount} Districts, ${cCount} Cases, ${aCount} Accused` });
+    } catch (error) {
+        console.error("Wipe Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
+    }
+});
+
+// GET /server/crime_vision_ai_02_function/seed
+app.get('/seed', async (req, res) => {
+    try {
+        const catalystApp = catalyst.initialize(req);
+        const datastore = catalystApp.datastore();
+        const fs = require('fs');
+        const path = require('path');
+
+        function parseCSV(content) {
+            const lines = content.trim().split('\n');
+            const headers = lines[0].split(',').map(h => h.trim());
+            return lines.slice(1).map(line => {
+                const values = line.split(',');
+                const obj = {};
+                headers.forEach((header, i) => {
+                    if (values[i] !== undefined) {
+                        let val = values[i].trim();
+                        // Catalyst requires numbers for BIGINT, FLOAT columns
+                        if (header === 'CaseMasterID' || header === 'CrimeNo' || header === 'CrimeMajorHeadID' || header === 'PoliceStationID' || header === 'AccusedMasterID' || header === 'AgeYear') {
+                            val = parseInt(val, 10);
+                        }
+                        if (header === 'lat' || header === 'lng') {
+                            val = parseFloat(val);
+                        }
+                        obj[header] = val;
+                    }
+                });
+                return obj;
+            });
+        }
+
+        async function insertData(tableName, filePath) {
+            const csvContent = fs.readFileSync(filePath, 'utf8');
+            const rows = parseCSV(csvContent);
+            const table = datastore.table(tableName);
+            
+            const batchSize = 100;
+            for (let i = 0; i < rows.length; i += batchSize) {
+                const batch = rows.slice(i, i + batchSize);
+                await table.insertRows(batch);
+            }
+            return rows.length;
+        }
+
+        const dCount = await insertData('District', 'E:/hackathon/Datathon_2026/synthetic_data/District_clean.csv');
+        const cCount = await insertData('CaseMaster', 'E:/hackathon/Datathon_2026/synthetic_data/CaseMaster_clean.csv');
+        const aCount = await insertData('Accused', 'E:/hackathon/Datathon_2026/synthetic_data/Accused_clean.csv');
+        
+        res.status(200).json({ status: 'success', message: `Inserted ${dCount} Districts, ${cCount} Cases, ${aCount} Accused` });
+    } catch (error) {
+        console.error("Seed Error:", error);
+        res.status(400).json({ status: 'error', message: error.toString() });
     }
 });
 

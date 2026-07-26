@@ -44,3 +44,19 @@ test_env/
 scratch/
 *.test_*.js
 test_*.js
+
+# Catalyst Data & Temp Files
+*.zip
+.build/
+export_*/
+import_report_*/
+synthetic_data_OLD_backup/
+*.txt
+*.py
+run_imports.js
+seed_data.js
+truncate.js
+synthetic_data/*_v2.csv
+synthetic_data/*_v3.csv
+synthetic_data/*_prod.csv
+synthetic_data/*_17*.csv
