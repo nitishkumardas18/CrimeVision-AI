@@ -1,0 +1,13 @@
+{
+  "client": {
+    "source": "client/.output/public",
+    "ignore": []
+  },
+  "functions": {
+    "source": "functions",
+    "ignore": [],
+    "targets": [
+      "crime_vision_ai_02_function"
+    ]
+  }
+}

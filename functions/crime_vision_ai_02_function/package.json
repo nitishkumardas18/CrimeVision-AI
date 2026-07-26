@@ -1,0 +1,10 @@
+{
+	"name": "crime_vision_ai_02_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "2k24.cs1d.2414168@gmail.com",
+	"dependencies": {
+		"express": "^5.2.1",
+		"zcatalyst-sdk-node": "^3.4.0"
+	}
+}
