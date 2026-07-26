@@ -1,7 +1,7 @@
 # CrimeVision AI — Karnataka State Police Intelligence & Predictive Analytics Platform
 
 > **Datathon 2026 Submission** | **Hosted exclusively on Zoho Catalyst Serverless Platform**  
-> **Live Deployed Prototype:** [CrimeVision AI Live Prototype](https://crime-vision-ai-02-60080081365.development.catalystserverless.in/app/index.html#/)
+> **Live Deployed Prototype:** [CrimeVision AI Live Prototype](https://crime-vision-ai-02-60080081365.catalystserverless.in/app/index.html#/)
 
 ---
 
@@ -94,4 +94,4 @@
 
 ## 🔗 Live Solution Link
 
-- **Deployed Application:** [https://crime-vision-ai-02-60080081365.development.catalystserverless.in/app/index.html#/](https://crime-vision-ai-02-60080081365.development.catalystserverless.in/app/index.html#/)
+- **Deployed Application:** [https://crime-vision-ai-02-60080081365.catalystserverless.in/app/index.html#/](https://crime-vision-ai-02-60080081365.catalystserverless.in/app/index.html#/)
