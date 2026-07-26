@@ -318,9 +318,13 @@ app.get('/seed', async (req, res) => {
             return rows.length;
         }
 
-        const dCount = await insertData('District', 'E:/hackathon/Datathon_2026/synthetic_data/District_clean.csv');
-        const cCount = await insertData('CaseMaster', 'E:/hackathon/Datathon_2026/synthetic_data/CaseMaster_clean.csv');
-        const aCount = await insertData('Accused', 'E:/hackathon/Datathon_2026/synthetic_data/Accused_clean.csv');
+        const districtPath = path.join(__dirname, 'synthetic_data', 'District_clean.csv');
+        const casePath = path.join(__dirname, 'synthetic_data', 'CaseMaster_clean.csv');
+        const accusedPath = path.join(__dirname, 'synthetic_data', 'Accused_clean.csv');
+        
+        const dCount = await insertData('District', districtPath);
+        const cCount = await insertData('CaseMaster', casePath);
+        const aCount = await insertData('Accused', accusedPath);
         
         res.status(200).json({ status: 'success', message: `Inserted ${dCount} Districts, ${cCount} Cases, ${aCount} Accused` });
     } catch (error) {
